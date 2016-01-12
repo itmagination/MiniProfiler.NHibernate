@@ -1,4 +1,5 @@
-﻿using System.Data;
+﻿using System;
+using System.Data;
 using System.Data.Common;
 using System.Data.SqlClient;
 using System.Text;
@@ -7,18 +8,20 @@ using NHibernate.AdoNet;
 using NHibernate.AdoNet.Util;
 using NHibernate.Exceptions;
 using NHibernate.Util;
+using StackExchange.Profiling.Data;
 
 namespace StackExchange.Profiling.NHibernate.Infrastructure
 {
-    internal class ProfiledSqlClientBatchingBatcher : AbstractBatcher
+    internal class ProfiledSqlClientBatchingBatcher : SqlClientBatchingProperBatcher
     {
         private int _batchSize;
         private int _totalExpectedRowsAffected;
-        private SqlClientSqlCommandSet _currentBatch;
+        private SqlClientSqlProperBatchingCommandSet _currentBatch;
         private StringBuilder _currentBatchCommandsLog;
         private readonly int _defaultTimeout;
 
-        public ProfiledSqlClientBatchingBatcher(ConnectionManager connectionManager, IInterceptor interceptor) : base(connectionManager, interceptor)
+        public ProfiledSqlClientBatchingBatcher(ConnectionManager connectionManager, IInterceptor interceptor)
+            : base(connectionManager, interceptor)
         {
             _batchSize = Factory.Settings.AdoBatchSize;
             _defaultTimeout = PropertiesHelper.GetInt32(global::NHibernate.Cfg.Environment.CommandTimeout, global::NHibernate.Cfg.Environment.Properties, -1);
@@ -84,7 +87,26 @@ namespace StackExchange.Profiling.NHibernate.Infrastructure
             int rowsAffected;
             try
             {
-                rowsAffected = _currentBatch.ExecuteNonQuery();
+                var dbProfiler = ((IDbProfiler)MiniProfiler.Current);
+                if (MiniProfiler.Current == null)
+                    rowsAffected = _currentBatch.ExecuteNonQuery();
+                else
+                {
+                    dbProfiler.ExecuteStart(_currentBatch.BatchCommand, SqlExecuteType.NonQuery);
+                    try
+                    {
+                        rowsAffected = _currentBatch.ExecuteNonQuery();
+                    }
+                    catch (Exception ex)
+                    {
+                        dbProfiler.OnError(_currentBatch.BatchCommand, SqlExecuteType.NonQuery, ex);
+                        throw;
+                    }
+                    finally
+                    {
+                        dbProfiler.ExecuteFinish(_currentBatch.BatchCommand, SqlExecuteType.NonQuery, (DbDataReader)null);
+                    }
+                }
             }
             catch (DbException e)
             {
@@ -98,16 +120,16 @@ namespace StackExchange.Profiling.NHibernate.Infrastructure
             _currentBatch = CreateConfiguredBatch();
         }
 
-        private SqlClientSqlCommandSet CreateConfiguredBatch()
+        private SqlClientSqlProperBatchingCommandSet CreateConfiguredBatch()
         {
-            var result = new SqlClientSqlCommandSet();
+            var result = new SqlClientSqlProperBatchingCommandSet();
             if (_defaultTimeout > 0)
             {
                 try
                 {
                     result.CommandTimeout = _defaultTimeout;
                 }
-                catch {}
+                catch { }
             }
 
             return result;
